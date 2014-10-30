@@ -4,6 +4,8 @@ from gearman.command_handler import GearmanCommandHandler
 from gearman.errors import InvalidWorkerState
 from gearman.protocol import GEARMAN_COMMAND_PRE_SLEEP, GEARMAN_COMMAND_RESET_ABILITIES, GEARMAN_COMMAND_CAN_DO, GEARMAN_COMMAND_SET_CLIENT_ID, GEARMAN_COMMAND_GRAB_JOB_UNIQ, \
     GEARMAN_COMMAND_WORK_STATUS, GEARMAN_COMMAND_WORK_COMPLETE, GEARMAN_COMMAND_WORK_FAIL, GEARMAN_COMMAND_WORK_EXCEPTION, GEARMAN_COMMAND_WORK_WARNING, GEARMAN_COMMAND_WORK_DATA
+from gearman.protocol import GEARMAN_COMMAND_NOOP
+from gearman.worker_grab import WorkerGrab
 
 gearman_logger = logging.getLogger(__name__)
 
@@ -21,6 +23,7 @@ class GearmanWorkerCommandHandler(GearmanCommandHandler):
 
         self._handler_abilities = []
         self._client_id = None
+        self._worker_grab = WorkerGrab()
 
     def initial_state(self, abilities=None, client_id=None):
         self.set_client_id(client_id)
@@ -94,16 +97,19 @@ class GearmanWorkerCommandHandler(GearmanCommandHandler):
 
         return True
 
-    def recv_noop(self):
+    def recv_noop(self, dummy_noop=False):
         """Transition from being SLEEP --> AWAITING_JOB / SLEEP
 
           AWAITING_JOB -> AWAITING_JOB :: Noop transition, we're already awaiting a job
         SLEEP -> AWAKE -> AWAITING_JOB :: Transition if we can acquire the worker job lock
         SLEEP -> AWAKE -> SLEEP        :: Transition if we can NOT acquire a worker job lock
         """
+
         if self._check_job_lock():
             pass
         elif self._acquire_job_lock():
+            if WorkerGrab.DO_GRAB and dummy_noop:
+                self._worker_grab.set_dummy_noop_flag_by_handler(self, False)
             self._grab_job()
         else:
             self._sleep()
@@ -115,10 +121,23 @@ class GearmanWorkerCommandHandler(GearmanCommandHandler):
 
         AWAITING_JOB -> SLEEP :: Always transition to sleep if we have nothing to do
         """
+
         self._release_job_lock()
         self._sleep()
 
+        if WorkerGrab.DO_GRAB:
+            self._send_dummy_noop()
+
         return True
+
+    def _send_dummy_noop(self):
+        if not WorkerGrab.DO_GRAB:
+            return
+
+        handler = self._worker_grab.get_dummy_noop_handler()
+        if handler != None:
+            handler.recv_command(GEARMAN_COMMAND_NOOP, dummy_noop=True)
+        return
 
     def recv_job_assign_uniq(self, job_handle, task, unique, data):
         """Transition from being AWAITING_JOB --> EXECUTE_JOB --> SLEEP
@@ -139,6 +158,10 @@ class GearmanWorkerCommandHandler(GearmanCommandHandler):
         # Release the job lock once we're doing and go back to sleep
         self._release_job_lock()
         self._sleep()
+ 
+        if WorkerGrab.DO_GRAB:
+            self._worker_grab.set_all_dummy_noop_flag_true()
+            self._send_dummy_noop()
 
         return True
 

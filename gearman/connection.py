@@ -27,13 +27,31 @@ class GearmanConnection(object):
     """
     connect_cooldown_seconds = 1.0
 
-    def __init__(self, host=None, port=DEFAULT_GEARMAN_PORT, keyfile=None, certfile=None, ca_certs=None):
+    def __init__(self,
+                 host=None,
+                 port=DEFAULT_GEARMAN_PORT,
+                 keyfile=None,
+                 certfile=None,
+                 ca_certs=None,
+                 keepalive=False,
+                 keepintvl=None,
+                 keepcnt=None,
+                 keepidle=None):
         port = port or DEFAULT_GEARMAN_PORT
         self.gearman_host = host
         self.gearman_port = port
         self.keyfile = keyfile
         self.certfile = certfile
         self.ca_certs = ca_certs
+
+        # These options are described in more detail in the tcp(7) man page
+        # for the TCP_KEEPINTVL, TCP_KEEPCNT, and TCP_KEEPIDLE socket options.
+        # Default values can be found in /proc/sys/net/ipv4 in the tcp_keep* files.
+        # NOTE: May not work on all systems.
+        self.keepalive = keepalive  # turn KEEPALIVE on or off
+        self.keepintvl = keepintvl  # seconds b/w TCP keep-alive probes
+        self.keepcnt = keepcnt      # max probes to send before killing connection
+        self.keepidle = keepidle    # seconds of idle time before sending probes
 
         if host is None:
             raise ServerUnavailable("No host specified")
@@ -128,6 +146,16 @@ class GearmanConnection(object):
         current_socket.setblocking(0)
         current_socket.settimeout(0.0)
         current_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, struct.pack('L', 1))
+
+        if self.keepalive:
+            current_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            if self.keepidle:
+                current_socket.setsockopt(socket.SOL_TCP, socket.TCP_KEEPIDLE, int(self.keepidle))
+            if self.keepintvl:
+                current_socket.setsockopt(socket.SOL_TCP, socket.TCP_KEEPINTVL, int(self.keepintvl))
+            if self.keepcnt:
+                current_socket.setsockopt(socket.SOL_TCP, socket.TCP_KEEPCNT, int(self.keepcnt))
+
         self.gearman_socket = current_socket
 
     def read_command(self):
@@ -166,12 +194,9 @@ class GearmanConnection(object):
                 recv_buffer = self.gearman_socket.recv(bytes_to_read)
             except ssl.SSLError as e:
                 # if we would block, ignore the error
-                if e.errno == ssl.SSL_ERROR_WANT_READ:
-                    continue
-                elif e.errno == ssl.SSL_ERROR_WANT_WRITE:
-                    continue
-                else:
+                if e.errno != ssl.SSL_ERROR_WANT_READ:
                     self.throw_exception(exception=e)
+                continue
             except socket.error, socket_exception:
                 self.throw_exception(exception=socket_exception)
 
@@ -211,22 +236,10 @@ class GearmanConnection(object):
 
     def send_command(self, cmd_type, cmd_args):
         """Adds a single gearman command to the outgoing command queue"""
-        self._outgoing_commands.append((cmd_type, cmd_args))
+        packed_command = self._pack_command(cmd_type, cmd_args)
+        return self.send_data_to_socket(packed_command)
 
-    def send_commands_to_buffer(self):
-        """Sends and packs commands -> buffer"""
-        if not self._outgoing_commands:
-            return
-
-        packed_data = [self._outgoing_buffer]
-        while self._outgoing_commands:
-            cmd_type, cmd_args = self._outgoing_commands.popleft()
-            packed_command = self._pack_command(cmd_type, cmd_args)
-            packed_data.append(packed_command)
-
-        self._outgoing_buffer = ''.join(packed_data)
-
-    def send_data_to_socket(self):
+    def send_data_to_socket(self, data):
         """Send data from buffer -> socket
 
         Returns remaining size of the output buffer
@@ -234,28 +247,19 @@ class GearmanConnection(object):
         if not self.connected:
             self.throw_exception(message='disconnected')
 
-        if not self._outgoing_buffer:
-            return 0
+        bytes_sent = 0
+        try:
+            bytes_sent = self.gearman_socket.send(data)
+        except ssl.SSLError as e:
+            if e.errno != ssl.SSL_ERROR_WANT_WRITE:
+                self.throw_exception(exception=e)
+        except socket.error, socket_exception:
+            self.throw_exception(exception=socket_exception)
 
-        while True:
-            try:
-                bytes_sent = self.gearman_socket.send(self._outgoing_buffer)
-            except ssl.SSLError as e:
-                if e.errno == ssl.SSL_ERROR_WANT_READ:
-                    continue
-                elif e.errno == ssl.SSL_ERROR_WANT_WRITE:
-                    continue
-                else:
-                    self.throw_exception(exception=e)
-            except socket.error, socket_exception:
-                self.throw_exception(exception=socket_exception)
+        if bytes_sent == 0:
+            self.throw_exception(message='remote disconnected')
 
-            if bytes_sent == 0:
-                self.throw_exception(message='remote disconnected')
-            break
-
-        self._outgoing_buffer = self._outgoing_buffer[bytes_sent:]
-        return len(self._outgoing_buffer)
+        return bytes_sent 
 
     def _pack_command(self, cmd_type, cmd_args):
         """Converts a command to its raw binary format"""

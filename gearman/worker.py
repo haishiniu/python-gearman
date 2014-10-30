@@ -6,6 +6,8 @@ from gearman import compat
 from gearman.connection_manager import GearmanConnectionManager
 from gearman.worker_handler import GearmanWorkerCommandHandler
 from gearman.errors import ConnectionError
+from gearman.protocol import GEARMAN_COMMAND_NOOP
+from gearman.worker_grab import WorkerGrab
 
 gearman_logger = logging.getLogger(__name__)
 
@@ -27,6 +29,8 @@ class GearmanWorker(GearmanConnectionManager):
         self.command_handler_holding_job_lock = None
 
         self._update_initial_state()
+
+        self.worker_grab = WorkerGrab()
 
     def _update_initial_state(self):
         self.handler_initial_state['abilities'] = self.worker_abilities.keys()
@@ -69,10 +73,11 @@ class GearmanWorker(GearmanConnectionManager):
 
         return client_id
 
-    def work(self, poll_timeout=POLL_TIMEOUT_IN_SECONDS):
+    def work(self, do_grab=False, poll_timeout=POLL_TIMEOUT_IN_SECONDS):
         """Loop indefinitely, complete tasks from all connections."""
         continue_working = True
         worker_connections = []
+        first_run = True
 
         # We're going to track whether a previous call to our closure indicated
         # we were processing a job. This is just a list of possibly a single
@@ -81,6 +86,8 @@ class GearmanWorker(GearmanConnectionManager):
         # This is all so that we can determine when we've finished processing a job
         # correctly.
         had_job = []
+
+        WorkerGrab.DO_GRAB = do_grab
 
         def continue_while_connections_alive(any_activity):
             if had_job and not self.has_job_lock():
@@ -92,10 +99,34 @@ class GearmanWorker(GearmanConnectionManager):
 
             return self.after_poll(any_activity)
 
+        def before_handling_activity(read_connections, write_connections, dead_connections):
+            # Called before actually handling activity...
+            if not read_connections and not self.has_job_lock():
+                if not WorkerGrab.DO_GRAB:
+                    return
+
+                self.worker_grab.set_all_dummy_noop_flag_true()
+
+                # If nothing has data to read and we are not processing a job...
+                for connection in set(worker_connections) - set(dead_connections):
+                    # Have all of the handlers (that are still active)...
+                    handler = self.connection_to_handler_map[connection]
+                    # Act as if they have received a NOOP.
+                    handler.recv_command(GEARMAN_COMMAND_NOOP, dummy_noop=True)
+                    return
+
         # Shuffle our connections after the poll timeout
         while continue_working:
             worker_connections = self.establish_worker_connections()
-            continue_working = self.poll_connections_until_stopped(worker_connections, continue_while_connections_alive, timeout=poll_timeout)
+
+            if do_grab:
+                if first_run:
+                    self.worker_grab.init_connection_handler_list(self.connection_to_handler_map)
+                    first_run = False
+                else:
+                    self.worker_grab.update_connection_handler_list(self.connection_to_handler_map)
+
+            continue_working = self.poll_connections_until_stopped(worker_connections, continue_while_connections_alive, timeout=poll_timeout, prehandle=before_handling_activity)
 
         # If we were kicked out of the worker loop, we should shutdown all our connections
         for current_connection in worker_connections:

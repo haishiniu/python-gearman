@@ -64,11 +64,7 @@ class GearmanConnectionManager(object):
             if isinstance(element, str):
                 self.add_connection(element)
             elif isinstance(element, dict):
-                if not all (k in element for k in ('host', 'port', 'keyfile', 'certfile', 'ca_certs')):
-                    raise GearmanError("Incomplete SSL connection definition")
-                self.add_ssl_connection(element['host'], element['port'],
-                                        element['keyfile'], element['certfile'],
-                                        element['ca_certs'])
+                self.add_complex_connection(**element)
 
         self.handler_to_connection_map = {}
         self.connection_to_handler_map = {}
@@ -84,13 +80,15 @@ class GearmanConnectionManager(object):
     # Connection management functions #
     ###################################
 
-    def add_ssl_connection(self, host, port, keyfile, certfile, ca_certs):
-        """Add a new SSL connection to this connection manager"""
-        client_connection = self.connection_class(host=host,
-                                                  port=port,
-                                                  keyfile=keyfile,
-                                                  certfile=certfile,
-                                                  ca_certs=ca_certs)
+    def add_complex_connection(self, **keywords):
+        """
+        Add a new complex connection to this connection manager.
+
+        A "complex" connection is one with various connection options, such as
+        using SSL or setting keepalive values. This method accepts a dictionary, the
+        keys of which correspond to the GearmanConnection.__init__() parameters.
+        """
+        client_connection = self.connection_class(**keywords)
         self.connection_list.append(client_connection)
         return client_connection
 
@@ -156,11 +154,11 @@ class GearmanConnectionManager(object):
             except ConnectionError:
                 dead_connections.add(current_connection)
 
-        for current_connection in wr_connections:
-            try:
-                self.handle_write(current_connection)
-            except ConnectionError:
-                dead_connections.add(current_connection)
+        # for current_connection in wr_connections:
+           # try:
+           #     self.handle_write(current_connection)
+           # except ConnectionError:
+           #     dead_connections.add(current_connection)
 
         for current_connection in ex_connections:
             self.handle_error(current_connection)
@@ -183,7 +181,7 @@ class GearmanConnectionManager(object):
                 events |= gearman.io.WRITE
             poller.register(conn, events)
 
-    def poll_connections_until_stopped(self, submitted_connections, callback_fxn, timeout=None):
+    def poll_connections_until_stopped(self, submitted_connections, callback_fxn, timeout=None, prehandle=None):
         """Continue to poll our connections until we receive a stopping condition"""
         stopwatch = gearman.util.Stopwatch(timeout)
         submitted_connections = set(submitted_connections)
@@ -206,6 +204,9 @@ class GearmanConnectionManager(object):
 
             # Do a single robust select and handle all connection activity
             read_connections, write_connections, dead_connections = self.poll_connections_once(poller, connection_map, timeout=time_remaining)
+
+            if prehandle:
+                prehandle(read_connections, write_connections, dead_connections)
 
             # Handle reads and writes and close all of the dead connections
             read_connections, write_connections, dead_connections = self.handle_connection_activity(read_connections, write_connections, dead_connections)
@@ -239,12 +240,12 @@ class GearmanConnectionManager(object):
         # Notify the handler that we have commands to fetch
         current_handler.fetch_commands()
 
-    def handle_write(self, current_connection):
-        # Transfer command from command queue -> buffer
-        current_connection.send_commands_to_buffer()
+    #def handle_write(self, current_connection):
+    #    # Transfer command from command queue -> buffer
+    #    current_connection.send_commands_to_buffer()
 
-        # Transfer data from buffer -> socket
-        current_connection.send_data_to_socket()
+    #    # Transfer data from buffer -> socket
+    #    current_connection.send_data_to_socket()
 
     def handle_error(self, current_connection):
         dead_handler = self.connection_to_handler_map.pop(current_connection, None)
