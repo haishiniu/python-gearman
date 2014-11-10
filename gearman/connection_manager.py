@@ -124,6 +124,15 @@ class GearmanConnectionManager(object):
         return current_connection
 
     def poll_connections_once(self, poller, connection_map, timeout=None):
+        #This function is to do poll
+        def do_poll(timeout):
+            while True:
+                try:
+                    return poller.poll(timeout=timeout)
+                except IOError as e:
+                    if e.errno != errno.EINTR:
+                        raise
+
         # a timeout of -1 when used with epoll will block until there
         # is activity. Select does not support negative timeouts, so this
         # is translated to a timeout=None when falling back to select
@@ -132,7 +141,7 @@ class GearmanConnectionManager(object):
         readable = set()
         writable = set()
         errors = set()
-        for fileno, events in poller.poll(timeout=timeout):
+        for fileno, events in do_poll(timeout=timeout):
             conn = connection_map.get(fileno)
             if not conn:
                 continue
