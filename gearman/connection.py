@@ -182,7 +182,7 @@ class GearmanConnection(object):
 
         return received_commands
 
-    def read_data_from_socket(self, bytes_to_read=4096):
+    def read_data_from_socket(self, bytes_to_read=6553600):
         """Reads data from socket --> buffer"""
         if not self.connected:
             self.throw_exception(message='disconnected')
@@ -248,8 +248,14 @@ class GearmanConnection(object):
             self.throw_exception(message='disconnected')
 
         bytes_sent = 0
+        data_len = len(data)
         try:
-            bytes_sent = self.gearman_socket.send(data)
+            if data_len < 8192:
+                bytes_sent = self.gearman_socket.send(data)
+            else:
+                ret = self.gearman_socket.sendall(data)
+                if ret == None:
+                    bytes_sent = data_len
         except ssl.SSLError as e:
             if e.errno != ssl.SSL_ERROR_WANT_WRITE:
                 self.throw_exception(exception=e)

@@ -1,5 +1,5 @@
 import logging
-
+import errno
 import gearman.io
 import gearman.util
 from gearman.connection import GearmanConnection
